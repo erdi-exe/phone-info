@@ -2,13 +2,19 @@
 # For Termux on Android. Copy this file to your phone, then run:
 #   python phone_info.py
 
+import json
 import os
 import platform
-import re
+import secrets
 import shutil
 import socket
+import string
 import subprocess
 import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta
+from pathlib import Path
 
 
 GITHUB = "https://github.com/erdi-exe"
@@ -380,10 +386,490 @@ def all_props():
         print(line)
 
 
+def bar(percent, width=28):
+    percent = max(0, min(100, int(percent)))
+    filled = int(width * percent / 100)
+    return "[" + "#" * filled + "-" * (width - filled) + f"] {percent}%"
+
+
+def mem_stats():
+    text = read_file("/proc/meminfo")
+    values = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        number = value.strip().split()[0]
+        if number.isdigit():
+            values[key] = int(number)
+    total = values.get("MemTotal", 0)
+    available = values.get("MemAvailable", values.get("MemFree", 0))
+    used = max(total - available, 0)
+    percent = round(used * 100 / total) if total else 0
+    return total, used, available, percent
+
+
+def cpu_usage():
+    def sample():
+        line = read_file("/proc/stat").splitlines()[0]
+        parts = [int(x) for x in line.split()[1:]]
+        idle = parts[3] + (parts[4] if len(parts) > 4 else 0)
+        total = sum(parts)
+        return idle, total
+
+    idle1, total1 = sample()
+    time.sleep(0.25)
+    idle2, total2 = sample()
+    total_delta = total2 - total1
+    idle_delta = idle2 - idle1
+    if total_delta <= 0:
+        return 0
+    return round((1 - idle_delta / total_delta) * 100)
+
+
+def live_monitor():
+    os.system("clear")
+    show_art()
+    print("Live CPU / RAM")
+    print("Press Ctrl+C to stop.")
+    print()
+    try:
+        while True:
+            cpu = cpu_usage()
+            total, used, available, percent = mem_stats()
+            print("\033[2K\r", end="")
+            print(f"CPU {bar(cpu)}")
+            print(f"RAM {bar(percent)}  {round(used/1024)} / {round(total/1024)} MB")
+            print("\033[2A", end="", flush=True)
+            time.sleep(0.75)
+    except KeyboardInterrupt:
+        print("\n\nStopped.")
+
+
+def temperatures():
+    section("Temperatures")
+    found = False
+    thermal = "/sys/class/thermal"
+    if os.path.isdir(thermal):
+        for name in sorted(os.listdir(thermal)):
+            if not name.startswith("thermal_zone"):
+                continue
+            folder = os.path.join(thermal, name)
+            temp = read_file(os.path.join(folder, "temp"))
+            kind = read_file(os.path.join(folder, "type")) or name
+            if temp.lstrip("-").isdigit():
+                value = int(temp)
+                celsius = value / 1000 if value > 200 else value / 10 if value > 80 else value
+                show(kind, f"{celsius:.1f} C")
+                found = True
+
+    battery_temp = None
+    base = "/sys/class/power_supply"
+    if os.path.isdir(base):
+        for name in os.listdir(base):
+            temp = read_file(os.path.join(base, name, "temp"))
+            if temp.isdigit():
+                battery_temp = round(int(temp) / 10, 1)
+                break
+    if battery_temp is not None:
+        show("Battery", f"{battery_temp} C")
+        found = True
+
+    api = run(["termux-battery-status"])
+    if api and "temperature" in api:
+        show("Termux battery JSON", api)
+        found = True
+
+    if not found:
+        show("Temps", "unknown on this device")
+
+
+def apps_info():
+    section("Apps")
+    user = run(["pm", "list", "packages", "-3"])
+    system = run(["pm", "list", "packages", "-s"])
+    all_apps = run(["pm", "list", "packages"])
+    user_lines = [line for line in user.splitlines() if line.strip()]
+    system_lines = [line for line in system.splitlines() if line.strip()]
+    all_lines = [line for line in all_apps.splitlines() if line.strip()]
+    show("User apps", len(user_lines) if user_lines else "unknown (needs pm)")
+    show("System apps", len(system_lines) if system_lines else "unknown")
+    show("Total packages", len(all_lines) if all_lines else "unknown")
+    if user_lines:
+        print()
+        print("User packages")
+        for line in user_lines[:40]:
+            print(" ", line.replace("package:", ""))
+        if len(user_lines) > 40:
+            print(f"  ... and {len(user_lines) - 40} more")
+
+
+def uptime_english():
+    section("Uptime")
+    raw = read_file("/proc/uptime").split()
+    if not raw:
+        show("Uptime", run(["uptime"]) or "unknown")
+        return
+    seconds = int(float(raw[0]))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    show("Uptime", f"{days}d {hours}h {minutes}m {secs}s")
+    boot = datetime.now() - timedelta(seconds=seconds)
+    show("Last boot", boot.strftime("%Y-%m-%d %H:%M:%S"))
+
+
+NOTES = {
+    "S": "overkill",
+    "A": "excellent",
+    "B": "great",
+    "C": "fine",
+    "D": "playable",
+    "E": "laggy",
+    "F": "unusable",
+}
+
+
+def ping_class(avg_ms, lost, total=10):
+    ladder = [
+        (10, "S", "95"),
+        (20, "A", "92"),
+        (35, "B", "32"),
+        (50, "C", "93"),
+        (80, "D", "33"),
+        (120, "E", "91"),
+        (10**9, "F", "31"),
+    ]
+    if avg_ms is None or lost >= total:
+        return "F", "31"
+    grade, code = "F", "31"
+    for limit, name, color in ladder:
+        if avg_ms <= limit:
+            grade, code = name, color
+            break
+    if lost > 0:
+        order = "SABCDEF"
+        colors = {"S": "95", "A": "92", "B": "32", "C": "93", "D": "33", "E": "91", "F": "31"}
+        grade = order[min(order.index(grade) + 1, len(order) - 1)]
+        code = colors[grade]
+    return grade, code
+
+
+def ping_tool():
+    host = input("Host [1.1.1.1]: ").strip() or "1.1.1.1"
+    print()
+    print(f"Pinging {host} ten times...")
+    print()
+    times = []
+    for attempt in range(1, 11):
+        text = run(["ping", "-c", "1", "-W", "2", host])
+        reply = "Request timed out."
+        ms = None
+        for line in text.splitlines():
+            lower = line.lower()
+            if "time=" in lower:
+                reply = line.strip()
+                piece = lower.split("time=", 1)[1]
+                number = ""
+                for char in piece:
+                    if char.isdigit() or char == ".":
+                        number += char
+                    elif number:
+                        break
+                if number:
+                    ms = float(number)
+                break
+            if "100% packet loss" in lower or "0 received" in lower:
+                reply = "Request timed out."
+        print(f"  {attempt}/10  {reply}")
+        if ms is not None:
+            times.append(ms)
+
+    lost = 10 - len(times)
+    avg = round(sum(times) / len(times)) if times else None
+    grade, code = ping_class(avg, lost)
+    print()
+    if avg is None:
+        print(paint(f"Class: F  {NOTES['F']}", code))
+        return
+    print(f"Average: {avg} ms    Lost: {lost}/10")
+    print(paint(f"Class: {grade}  {NOTES[grade]}", code))
+
+
+def public_ip():
+    section("Public IP")
+    urls = [
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+    ]
+    for url in urls:
+        try:
+            with urllib.request.urlopen(url, timeout=6) as response:
+                ip = response.read().decode("utf-8", errors="replace").strip()
+            if ip:
+                show("Public IP", ip)
+                show("Source", url)
+                return
+        except (urllib.error.URLError, TimeoutError, OSError):
+            continue
+    show("Public IP", "offline / blocked")
+
+
+def speed_estimate():
+    section("Speed estimate")
+    print("Downloading a small test file...")
+    url = "https://speed.cloudflare.com/__down?bytes=2000000"
+    try:
+        started = time.time()
+        with urllib.request.urlopen(url, timeout=20) as response:
+            data = response.read()
+        elapsed = max(time.time() - started, 0.001)
+        mb = len(data) / (1024 * 1024)
+        mbps = (len(data) * 8) / elapsed / 1_000_000
+        show("Downloaded", f"{mb:.2f} MB")
+        show("Time", f"{elapsed:.2f} s")
+        show("Estimate", f"{mbps:.1f} Mbps")
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        show("Speed test", f"failed ({error})")
+
+
+def wifi_signal():
+    section("Wi-Fi signal")
+    info = run(["termux-wifi-connectioninfo"])
+    if info:
+        try:
+            data = json.loads(info)
+            show("SSID", data.get("ssid"))
+            show("BSSID", data.get("bssid"))
+            show("IP", data.get("ip"))
+            show("Link speed", data.get("link_speed_mbps"))
+            show("Frequency", data.get("frequency_mhz"))
+            show("RSSI", data.get("rssi"))
+            show("Network ID", data.get("network_id"))
+            return
+        except json.JSONDecodeError:
+            print(info)
+            return
+    show("Wi-Fi", "install Termux:API and: pkg install termux-api")
+
+
+def password_tool():
+    section("Password generator")
+    raw = input("Length [16]: ").strip() or "16"
+    if not raw.isdigit() or int(raw) < 4:
+        print("Use a number 4 or higher.")
+        return
+    length = min(int(raw), 128)
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*()-_=+"
+    password = "".join(secrets.choice(alphabet) for _ in range(length))
+    show("Password", password)
+
+
+def qr_tool():
+    section("QR code")
+    text = input("Text or URL: ").strip()
+    if not text:
+        print("Nothing to encode.")
+        return
+    if shutil.which("qrencode"):
+        print()
+        print(run(["qrencode", "-t", "ANSIUTF8", text]))
+        return
+    print("qrencode is not installed.")
+    print("In Termux run: pkg install qrencode")
+
+
+def clipboard_tool():
+    section("Clipboard")
+    print("1. Show clipboard")
+    print("2. Set clipboard")
+    choice = input("Choose: ").strip()
+    if choice == "1":
+        text = run(["termux-clipboard-get"])
+        show("Clipboard", text or "empty / Termux:API missing")
+    elif choice == "2":
+        text = input("New clipboard text: ")
+        result = run(["termux-clipboard-set", text])
+        show("Set", "done" if result == "" else result or "done")
+    else:
+        print("Cancelled.")
+
+
+def notes_tool():
+    section("Notes")
+    path = Path(__file__).resolve().parent / "notes.txt"
+    print("1. Read notes")
+    print("2. Add a note")
+    choice = input("Choose: ").strip()
+    if choice == "1":
+        if not path.exists():
+            print("No notes yet.")
+            return
+        print()
+        print(path.read_text(encoding="utf-8", errors="replace"))
+    elif choice == "2":
+        text = input("Note: ").strip()
+        if not text:
+            print("Empty note.")
+            return
+        stamp = time.strftime("%Y-%m-%d %H:%M")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{stamp}] {text}\n")
+        show("Saved", str(path))
+    else:
+        print("Cancelled.")
+
+
+def file_size_tool():
+    section("File / folder size")
+    target = input("Path: ").strip() or "."
+    path = Path(target).expanduser()
+    if not path.exists():
+        print("Path not found.")
+        return
+    if path.is_file():
+        size = path.stat().st_size
+        show("File", str(path))
+        show("Size", f"{size} bytes ({gb(size)} GB)")
+        return
+    total = 0
+    files = 0
+    for root, _, names in os.walk(path):
+        for name in names:
+            try:
+                total += (Path(root) / name).stat().st_size
+                files += 1
+            except OSError:
+                continue
+    show("Folder", str(path))
+    show("Files", files)
+    show("Size", f"{total} bytes ({gb(total)} GB)")
+
+
+def pause():
+    input("\nPress Enter to go back...")
+
+
+def info_menu():
+    while True:
+        os.system("clear")
+        show_art()
+        print("Info")
+        print("1. Live CPU / RAM")
+        print("2. Temperatures")
+        print("3. Installed apps")
+        print("4. Uptime / last boot")
+        print("0. Back")
+        print()
+        choice = input("Choose: ").strip()
+        if choice == "1":
+            live_monitor()
+            pause()
+        elif choice == "2":
+            os.system("clear")
+            show_art()
+            temperatures()
+            pause()
+        elif choice == "3":
+            os.system("clear")
+            show_art()
+            apps_info()
+            pause()
+        elif choice == "4":
+            os.system("clear")
+            show_art()
+            uptime_english()
+            pause()
+        elif choice == "0":
+            return
+
+
+def network_menu():
+    while True:
+        os.system("clear")
+        show_art()
+        print("Network")
+        print("1. Ping test (S to F)")
+        print("2. Public IP")
+        print("3. Speed estimate")
+        print("4. Wi-Fi signal")
+        print("0. Back")
+        print()
+        choice = input("Choose: ").strip()
+        if choice == "1":
+            os.system("clear")
+            show_art()
+            ping_tool()
+            pause()
+        elif choice == "2":
+            os.system("clear")
+            show_art()
+            public_ip()
+            pause()
+        elif choice == "3":
+            os.system("clear")
+            show_art()
+            speed_estimate()
+            pause()
+        elif choice == "4":
+            os.system("clear")
+            show_art()
+            wifi_signal()
+            pause()
+        elif choice == "0":
+            return
+
+
+def tools_menu():
+    while True:
+        os.system("clear")
+        show_art()
+        print("Tools")
+        print("1. Password generator")
+        print("2. QR code")
+        print("3. Clipboard")
+        print("4. Notes")
+        print("5. File / folder size")
+        print("0. Back")
+        print()
+        choice = input("Choose: ").strip()
+        if choice == "1":
+            os.system("clear")
+            show_art()
+            password_tool()
+            pause()
+        elif choice == "2":
+            os.system("clear")
+            show_art()
+            qr_tool()
+            pause()
+        elif choice == "3":
+            os.system("clear")
+            show_art()
+            clipboard_tool()
+            pause()
+        elif choice == "4":
+            os.system("clear")
+            show_art()
+            notes_tool()
+            pause()
+        elif choice == "5":
+            os.system("clear")
+            show_art()
+            file_size_tool()
+            pause()
+        elif choice == "0":
+            return
+
+
 def menu():
     show_art()
     print("1. Full device report")
     print("2. Full device report + every getprop line")
+    print("3. Info")
+    print("4. Network")
+    print("5. Tools")
     print("0. Exit")
     print()
     choice = input("Choose: ").strip()
@@ -405,6 +891,8 @@ def full_report(include_all_props=False):
     network_info()
     display_info()
     sensors_and_extra()
+    uptime_english()
+    temperatures()
     if include_all_props:
         all_props()
     print()
@@ -417,15 +905,21 @@ def main():
         choice = menu()
         if choice == "1":
             full_report(False)
-            input("\nPress Enter to go back...")
+            pause()
         elif choice == "2":
             full_report(True)
-            input("\nPress Enter to go back...")
+            pause()
+        elif choice == "3":
+            info_menu()
+        elif choice == "4":
+            network_menu()
+        elif choice == "5":
+            tools_menu()
         elif choice == "0":
             print("Bye.")
             break
         else:
-            print("Pick 1, 2, or 0.")
+            print("Pick a number from the menu.")
             time.sleep(1)
 
 

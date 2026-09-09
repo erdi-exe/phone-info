@@ -1,37 +1,46 @@
 # Phone Info
 
-A Termux tool that prints detailed info about your Android phone, with ASCII art and a GitHub banner.
+A Termux toolkit for Android: full device report, live info, network tests, and small tools.
 
-It only reads this device. Nothing is uploaded or saved.
+It only reads this device. Nothing is uploaded unless you use Public IP or Speed estimate, which contact public test servers.
 
-## What it shows
+## Menu
 
-- Brand, model, manufacturer, board, hardware
-- Android version, SDK, security patch, build fingerprint
-- Kernel, uptime, CPU cores and frequencies
-- RAM and swap
-- Storage for `/`, home, and `/sdcard`
-- Battery status
-- Network and local IP
-- Display size and density
-- Extra build flags
-- Option 2 also dumps every `getprop` line
+1. Full device report
+2. Full device report + every `getprop` line
+3. Info
+   - Live CPU / RAM
+   - Temperatures
+   - Installed apps
+   - Uptime / last boot
+4. Network
+   - Ping test with S to F class
+   - Public IP
+   - Speed estimate
+   - Wi-Fi signal
+5. Tools
+   - Password generator
+   - QR code
+   - Clipboard
+   - Notes
+   - File / folder size
+0. Exit
 
 ## Requirements
 
 - Android phone
-- [Termux](https://termux.dev) (install from F-Droid or the official GitHub release, not the old Play Store copy)
+- [Termux](https://termux.dev) from F-Droid or the official GitHub release
 - Python 3 inside Termux
 
-`requirements.txt` has no pip packages. The script uses only Python built-ins.
+`requirements.txt` has no pip packages.
 
-Optional: better battery details
+Optional:
 
 ```bash
-pkg install termux-api
+pkg install termux-api qrencode
 ```
 
-Also install the **Termux:API** Android app if you use that package.
+Also install the **Termux:API** Android app if you want Wi-Fi signal, clipboard, and better battery JSON.
 
 ## How to run in Termux
 
@@ -39,14 +48,12 @@ Also install the **Termux:API** Android app if you use that package.
 
 Install Termux from F-Droid or the official Termux GitHub releases.
 
-### 2. Open Termux and update packages
+### 2. Update packages
 
 ```bash
 pkg update
 pkg upgrade
 ```
-
-Type `y` if it asks.
 
 ### 3. Install Python and Git
 
@@ -62,34 +69,31 @@ git clone https://github.com/erdi-exe/phone-info.git
 cd phone-info
 ```
 
-### 5. Install requirements
-
-```bash
-pip install -r requirements.txt
-```
-
-This step is safe even though there are no pip packages yet.
-
-### 6. Run the tool
-
-```bash
-python phone_info.py
-```
-
-### 7. Use the menu
-
-- `1` = full device report
-- `2` = full report + every `getprop` line
-- `0` = exit
-
-## Update later
+If you already cloned it:
 
 ```bash
 cd ~/phone-info
 git pull
 ```
 
+### 5. Install requirements
+
+```bash
+pip install -r requirements.txt
+```
+
+### 6. Run
+
+```bash
+python phone_info.py
+```
+
+### 7. Pick a menu number
+
+Use `1` to `5`, or `0` to exit.
+
 ## Notes
 
-- Some lines may say `unknown` if Android blocks them. That is normal without root.
-- Colors and the GitHub box need a normal Termux session, not a broken terminal.
+- Some values say `unknown` if Android blocks them. That is normal without root.
+- Live CPU / RAM stops with `Ctrl+C`.
+- Notes are saved to `notes.txt` in this folder.
