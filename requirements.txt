@@ -1,0 +1,3 @@
+# No extra packages. phone_info.py uses only Python's built-in tools.
+# Optional later: termux-api (gives better battery info)
+#   pkg install termux-api
