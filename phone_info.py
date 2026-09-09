@@ -88,13 +88,13 @@ def play_intro():
 play_intro()
 
 
-def run(command):
+def run(command, timeout=8):
     try:
         result = subprocess.run(
             command,
             capture_output=True,
             text=True,
-            timeout=8,
+            timeout=timeout,
         )
         return (result.stdout or result.stderr or "").strip()
     except (OSError, subprocess.TimeoutExpired):
@@ -747,6 +747,405 @@ def file_size_tool():
     show("Size", f"{total} bytes ({gb(total)} GB)")
 
 
+def need_termux_api(command_name):
+    if shutil.which(command_name):
+        return True
+    print(f"{command_name} was not found.")
+    print("Install: pkg install termux-api")
+    print("Also install the Termux:API Android app.")
+    return False
+
+
+def folder_size_bytes(path):
+    total = 0
+    count = 0
+    path = Path(path)
+    if not path.exists():
+        return 0, 0
+    if path.is_file():
+        try:
+            return path.stat().st_size, 1
+        except OSError:
+            return 0, 0
+    for root, _, names in os.walk(path):
+        for name in names:
+            try:
+                total += (Path(root) / name).stat().st_size
+                count += 1
+            except OSError:
+                continue
+    return total, count
+
+
+def process_list_tool():
+    section("Top processes")
+    text = run(["ps", "-A", "-o", "PID,PCPU,PMEM,NAME"], timeout=10)
+    if not text or "PID" not in text.upper():
+        text = run(["ps", "-eo", "pid,pcpu,pmem,comm"], timeout=10)
+    if not text:
+        text = run(["ps", "-A"], timeout=10)
+    if not text:
+        print("Could not read process list.")
+        return
+
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    print("\n".join(lines[:25]))
+    if len(lines) > 25:
+        print(f"... {len(lines) - 25} more lines")
+
+    print()
+    print("Sorted peek (best effort):")
+    rows = []
+    for line in lines[1:]:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        pid = parts[0]
+        try:
+            cpu = float(parts[1].replace("%", ""))
+            mem = float(parts[2].replace("%", ""))
+        except ValueError:
+            continue
+        name = " ".join(parts[3:]) if len(parts) > 3 else parts[-1]
+        rows.append((cpu, mem, pid, name))
+    rows.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    for cpu, mem, pid, name in rows[:12]:
+        print(f"  PID {pid:>6}  CPU {cpu:5.1f}  MEM {mem:5.1f}  {name}")
+
+
+def kill_process_tool():
+    section("Kill process")
+    print("Type a PID number, or part of a process name.")
+    target = input("PID or name: ").strip()
+    if not target:
+        print("Cancelled.")
+        return
+
+    pids = []
+    if target.isdigit():
+        pids = [target]
+    else:
+        text = run(["ps", "-A"], timeout=10)
+        for line in text.splitlines():
+            if target.lower() in line.lower():
+                parts = line.split()
+                if parts and parts[0].isdigit():
+                    pids.append(parts[0])
+                    print(" ", line.strip())
+
+    pids = list(dict.fromkeys(pids))
+    if not pids:
+        print("No matching process.")
+        return
+
+    print()
+    print("Will send SIGTERM to:", ", ".join(pids))
+    if input("Type yes to kill: ").strip().lower() != "yes":
+        print("Cancelled.")
+        return
+
+    for pid in pids:
+        ok = run(["kill", pid])
+        show(f"kill {pid}", ok or "signal sent")
+
+
+def termux_cleaner():
+    section("Termux storage cleaner")
+    home = Path.home()
+    prefix = Path(os.environ.get("PREFIX", "/data/data/com.termux/files/usr"))
+    targets = [
+        home / ".cache",
+        home / "downloads",
+        home / "Downloads",
+        home / "storage" / "downloads",
+        prefix / "var" / "cache",
+        home / ".pip" / "cache",
+        home / ".cache" / "pip",
+    ]
+
+    existing = []
+    print("Safe folders only (Termux cache / downloads):")
+    for path in targets:
+        if not path.exists():
+            continue
+        size, count = folder_size_bytes(path)
+        existing.append(path)
+        print(f"  {path}  ({count} files, {gb(size)} GB)")
+
+    if not existing:
+        print("Nothing found to clean.")
+        return
+
+    print()
+    if input("Type yes to delete these contents: ").strip().lower() != "yes":
+        print("Cancelled.")
+        return
+
+    deleted = 0
+    skipped = 0
+    for folder in existing:
+        if folder.is_file():
+            try:
+                folder.unlink()
+                deleted += 1
+            except OSError:
+                skipped += 1
+            continue
+        for item in folder.iterdir():
+            try:
+                if item.is_dir() and not item.is_symlink():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+                deleted += 1
+            except OSError:
+                skipped += 1
+    show("Deleted entries", deleted)
+    show("Skipped", skipped)
+
+
+def brightness_tool():
+    section("Screen brightness")
+    if not need_termux_api("termux-brightness"):
+        return
+    raw = input("Brightness 0-255 (or blank to skip): ").strip()
+    if not raw:
+        print("Cancelled.")
+        return
+    if not raw.isdigit() or not 0 <= int(raw) <= 255:
+        print("Use a number from 0 to 255.")
+        return
+    out = run(["termux-brightness", raw])
+    show("Brightness", out or raw)
+
+
+def keep_awake_tool():
+    section("Keep awake")
+    if not need_termux_api("termux-wake-lock"):
+        return
+    print("1. Keep awake ON")
+    print("2. Keep awake OFF")
+    choice = input("Choose: ").strip()
+    if choice == "1":
+        out = run(["termux-wake-lock"])
+        show("Wake lock", out or "on")
+    elif choice == "2":
+        out = run(["termux-wake-unlock"])
+        show("Wake lock", out or "off")
+    else:
+        print("Cancelled.")
+
+
+def port_check_tool():
+    section("Port check")
+    host = input("Host [1.1.1.1]: ").strip() or "1.1.1.1"
+    raw = input("Port [443]: ").strip() or "443"
+    if not raw.isdigit():
+        print("Port must be a number.")
+        return
+    port = int(raw)
+    started = time.time()
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            ms = round((time.time() - started) * 1000)
+            show("Result", f"OPEN  {host}:{port}  ({ms} ms)")
+    except OSError as error:
+        show("Result", f"CLOSED / blocked  {host}:{port}")
+        show("Detail", error)
+
+
+def dns_lookup_tool():
+    section("DNS lookup")
+    host = input("Hostname [github.com]: ").strip() or "github.com"
+    print()
+    try:
+        infos = socket.getaddrinfo(host, None)
+        seen = []
+        for info in infos:
+            ip = info[4][0]
+            if ip not in seen:
+                seen.append(ip)
+                show("Address", ip)
+        if not seen:
+            show("DNS", "no results")
+    except socket.gaierror as error:
+        show("DNS", error)
+
+    dig = run(["dig", "+short", host], timeout=10)
+    if dig:
+        print()
+        print("dig:")
+        print(dig)
+    host_cmd = run(["host", host], timeout=10)
+    if host_cmd:
+        print()
+        print(host_cmd)
+
+
+def traceroute_tool():
+    section("Traceroute")
+    host = input("Host [1.1.1.1]: ").strip() or "1.1.1.1"
+    print()
+    text = run(["traceroute", "-n", "-w", "2", "-q", "1", "-m", "20", host], timeout=60)
+    if not text:
+        text = run(["tracepath", "-n", host], timeout=60)
+    if not text:
+        print("Install traceroute: pkg install traceroute")
+        print("Or: pkg install iputils")
+        return
+    print(text)
+    hops = [line for line in text.splitlines() if line.strip() and not line.lower().startswith("traceroute")]
+    show("Hop lines", len(hops))
+
+
+def download_file_tool():
+    section("Download file")
+    url = input("URL: ").strip()
+    if not url:
+        print("Cancelled.")
+        return
+    default_name = url.rstrip("/").split("/")[-1] or "download.bin"
+    if "?" in default_name:
+        default_name = default_name.split("?", 1)[0] or "download.bin"
+    name = input(f"Save as [{default_name}]: ").strip() or default_name
+    folder = Path.home() / "downloads"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / name
+    print()
+    print(f"Saving to {target}")
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response, target.open("wb") as handle:
+            total = 0
+            while True:
+                chunk = response.read(1024 * 64)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                total += len(chunk)
+                print(f"\r  {gb(total)} GB downloaded...", end="", flush=True)
+        print()
+        show("Saved", str(target))
+        show("Bytes", total)
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        print()
+        show("Download", f"failed ({error})")
+
+
+def camera_photo_tool():
+    section("Camera photo")
+    if not need_termux_api("termux-camera-photo"):
+        return
+    folder = Path.home() / "downloads"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / f"photo_{time.strftime('%Y%m%d_%H%M%S')}.jpg"
+    print("Opening camera...")
+    out = run(["termux-camera-photo", str(target)], timeout=120)
+    if target.exists():
+        show("Saved", str(target))
+        show("Size", f"{target.stat().st_size} bytes")
+    else:
+        show("Photo", out or "failed / permission denied")
+
+
+def battery_live_bar():
+    section("Live battery")
+    if not need_termux_api("termux-battery-status"):
+        return
+    print("Press Ctrl+C to stop.")
+    print()
+    try:
+        while True:
+            raw = run(["termux-battery-status"], timeout=5)
+            percent = 0
+            status = "unknown"
+            try:
+                data = json.loads(raw)
+                percent = int(data.get("percentage", 0))
+                status = data.get("status", "unknown")
+            except (json.JSONDecodeError, TypeError, ValueError):
+                print(raw or "no battery data")
+                return
+            print("\033[2K\r", end="")
+            print(f"Battery {bar(percent)}  {status}")
+            print("\033[1A", end="", flush=True)
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nStopped.")
+
+
+def notification_tool():
+    section("Notification")
+    if not need_termux_api("termux-notification"):
+        return
+    title = input("Title [Phone Info]: ").strip() or "Phone Info"
+    content = input("Message: ").strip() or "Hello from Termux"
+    out = run(["termux-notification", "--title", title, "--content", content])
+    show("Notification", out or "sent")
+
+
+def share_text_tool():
+    section("Share text")
+    if not need_termux_api("termux-share"):
+        return
+    text = input("Text to share: ").strip()
+    if not text:
+        print("Cancelled.")
+        return
+    out = run(["termux-share", "-a", "send", text], timeout=30)
+    show("Share", out or "opened share sheet")
+
+
+def vibrate_tool():
+    section("Vibrate")
+    if not need_termux_api("termux-vibrate"):
+        return
+    raw = input("Duration ms [300]: ").strip() or "300"
+    if not raw.isdigit():
+        print("Use a number.")
+        return
+    out = run(["termux-vibrate", "-d", raw])
+    show("Vibrate", out or f"{raw} ms")
+
+
+def torch_tool():
+    section("Torch")
+    if not need_termux_api("termux-torch"):
+        return
+    print("1. Torch ON")
+    print("2. Torch OFF")
+    choice = input("Choose: ").strip()
+    if choice == "1":
+        out = run(["termux-torch", "on"])
+        show("Torch", out or "on")
+    elif choice == "2":
+        out = run(["termux-torch", "off"])
+        show("Torch", out or "off")
+    else:
+        print("Cancelled.")
+
+
+def location_tool():
+    section("Location")
+    if not need_termux_api("termux-location"):
+        return
+    print("Requesting one-shot location. Allow permission if Android asks.")
+    raw = run(["termux-location", "-p", "network,gps", "-r", "once"], timeout=60)
+    if not raw:
+        print("No location returned.")
+        return
+    try:
+        data = json.loads(raw)
+        show("Latitude", data.get("latitude"))
+        show("Longitude", data.get("longitude"))
+        show("Altitude", data.get("altitude"))
+        show("Accuracy", data.get("accuracy"))
+        show("Provider", data.get("provider"))
+        show("Speed", data.get("speed"))
+        show("Bearing", data.get("bearing"))
+    except json.JSONDecodeError:
+        print(raw)
+
+
 def pause():
     input("\nPress Enter to go back...")
 
@@ -785,6 +1184,48 @@ def info_menu():
             return
 
 
+def system_menu():
+    while True:
+        os.system("clear")
+        show_art()
+        print("System")
+        print("1. Process list")
+        print("2. Kill process")
+        print("3. Termux cache / downloads cleaner")
+        print("4. Screen brightness")
+        print("5. Keep awake")
+        print("0. Back")
+        print()
+        choice = input("Choose: ").strip()
+        if choice == "1":
+            os.system("clear")
+            show_art()
+            process_list_tool()
+            pause()
+        elif choice == "2":
+            os.system("clear")
+            show_art()
+            kill_process_tool()
+            pause()
+        elif choice == "3":
+            os.system("clear")
+            show_art()
+            termux_cleaner()
+            pause()
+        elif choice == "4":
+            os.system("clear")
+            show_art()
+            brightness_tool()
+            pause()
+        elif choice == "5":
+            os.system("clear")
+            show_art()
+            keep_awake_tool()
+            pause()
+        elif choice == "0":
+            return
+
+
 def network_menu():
     while True:
         os.system("clear")
@@ -794,6 +1235,10 @@ def network_menu():
         print("2. Public IP")
         print("3. Speed estimate")
         print("4. Wi-Fi signal")
+        print("5. Port check")
+        print("6. DNS lookup")
+        print("7. Traceroute")
+        print("8. Download file")
         print("0. Back")
         print()
         choice = input("Choose: ").strip()
@@ -816,6 +1261,80 @@ def network_menu():
             os.system("clear")
             show_art()
             wifi_signal()
+            pause()
+        elif choice == "5":
+            os.system("clear")
+            show_art()
+            port_check_tool()
+            pause()
+        elif choice == "6":
+            os.system("clear")
+            show_art()
+            dns_lookup_tool()
+            pause()
+        elif choice == "7":
+            os.system("clear")
+            show_art()
+            traceroute_tool()
+            pause()
+        elif choice == "8":
+            os.system("clear")
+            show_art()
+            download_file_tool()
+            pause()
+        elif choice == "0":
+            return
+
+
+def phone_menu():
+    while True:
+        os.system("clear")
+        show_art()
+        print("Phone / Termux:API")
+        print("1. Take photo")
+        print("2. Live battery bar")
+        print("3. Send notification")
+        print("4. Share text")
+        print("5. Vibrate")
+        print("6. Torch on/off")
+        print("7. Location once")
+        print("0. Back")
+        print()
+        choice = input("Choose: ").strip()
+        if choice == "1":
+            os.system("clear")
+            show_art()
+            camera_photo_tool()
+            pause()
+        elif choice == "2":
+            os.system("clear")
+            show_art()
+            battery_live_bar()
+            pause()
+        elif choice == "3":
+            os.system("clear")
+            show_art()
+            notification_tool()
+            pause()
+        elif choice == "4":
+            os.system("clear")
+            show_art()
+            share_text_tool()
+            pause()
+        elif choice == "5":
+            os.system("clear")
+            show_art()
+            vibrate_tool()
+            pause()
+        elif choice == "6":
+            os.system("clear")
+            show_art()
+            torch_tool()
+            pause()
+        elif choice == "7":
+            os.system("clear")
+            show_art()
+            location_tool()
             pause()
         elif choice == "0":
             return
@@ -870,9 +1389,11 @@ def menu():
     print("3. Info")
     print("4. Network")
     print("5. Tools")
+    print("6. System")
+    print("7. Phone / Termux:API")
     print("0. Exit")
     print()
-    choice = input("Choose: ").strip()
+    choice = input("Choose: ").strip().lower()
     return choice
 
 
@@ -901,26 +1422,34 @@ def full_report(include_all_props=False):
 
 def main():
     while True:
-        os.system("clear")
-        choice = menu()
-        if choice == "1":
-            full_report(False)
-            pause()
-        elif choice == "2":
-            full_report(True)
-            pause()
-        elif choice == "3":
-            info_menu()
-        elif choice == "4":
-            network_menu()
-        elif choice == "5":
-            tools_menu()
-        elif choice == "0":
-            print("Bye.")
+        try:
+            os.system("clear")
+            choice = menu()
+            if choice == "1":
+                full_report(False)
+                pause()
+            elif choice == "2":
+                full_report(True)
+                pause()
+            elif choice == "3":
+                info_menu()
+            elif choice == "4":
+                network_menu()
+            elif choice == "5":
+                tools_menu()
+            elif choice == "6":
+                system_menu()
+            elif choice == "7":
+                phone_menu()
+            elif choice in {"0", "q", "quit", "exit"}:
+                print("Bye.")
+                break
+            else:
+                print("Pick a number from the menu.")
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\nBye.")
             break
-        else:
-            print("Pick a number from the menu.")
-            time.sleep(1)
 
 
 if __name__ == "__main__":

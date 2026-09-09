@@ -1,7 +1,8 @@
-# No pip packages required. phone_info.py uses Python built-ins only.
+# No pip packages required.
 #
-# Optional Termux packages for extra features:
-#   pkg install termux-api    # battery JSON, Wi-Fi signal, clipboard
-#   pkg install qrencode     # QR codes in Tools
+# Optional Termux packages:
+#   pkg install termux-api     # phone helpers, Wi-Fi, clipboard, battery JSON
+#   pkg install qrencode      # QR codes
+#   pkg install traceroute    # traceroute tool
 #
-# Also install the Termux:API Android app from F-Droid if you use termux-api.
+# Also install the Termux:API Android app from F-Droid.
