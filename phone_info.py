@@ -1,6 +1,7 @@
 # Phone Info | https://github.com/erdi-exe
 # For Termux on Android. Copy this file to your phone, then run:
 #   python phone_info.py
+# Not working fully, there still are some bugs i need to fix, do NOT touch anything here
 
 import json
 import os
