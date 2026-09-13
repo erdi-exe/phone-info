@@ -1,5 +1,6 @@
 # Phone Info
 #Not Finished Fully, Still In Development
+#Fixed some issues just not fully finished, still need to do some more work on it
 
 A Termux toolkit for Android: device report, info, network tests, system tools, and Termux:API phone helpers.
 
