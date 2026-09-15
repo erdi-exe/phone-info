@@ -1,5 +1,5 @@
-# Phone Info | https://github.com/erdi-exe
-# For Termux on Android. Copy this file to your phone, then run:
+# Phone Info v2.0.0 | https://github.com/erdi-exe
+# For Termux on Android. Run:
 #   python phone_info.py
 # Not working fully, there still are some bugs i need to fix, do NOT touch anything here
 
@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 
+VERSION = "2.0.0"
 GITHUB = "https://github.com/erdi-exe"
 
 ART = r"""
@@ -27,6 +28,8 @@ ART = r"""
 |  __/| | | | (_) | | | |  __/| || | | |  _| (_) |
 |_|   |_| |_|\___/|_| |_|\___|___|_| |_|_|  \___/ 
 """
+
+_PROPS = None
 
 
 def paint(text, code):
@@ -67,26 +70,28 @@ def github_box(flash=False):
     ]
 
     if flash:
-        for tick in range(8):
-            shown = lines_on if tick % 2 == 0 else lines_off
-            print("\n".join(shown))
-            time.sleep(0.18)
-            print(f"\033[{len(shown)}A", end="")
+        # Clear + redraw. Avoid cursor-up tricks that break Termux.
+        for tick in range(6):
+            os.system("clear")
+            print(ART)
+            print()
+            print("\n".join(lines_on if tick % 2 == 0 else lines_off))
+            time.sleep(0.15)
+        os.system("clear")
+        print(ART)
+        print()
         print("\n".join(lines_on))
     else:
         print("\n".join(lines_on))
 
 
 def play_intro():
+    try:
+        github_box(flash=True)
+        time.sleep(0.25)
+    except Exception:
+        pass
     os.system("clear")
-    print(ART)
-    print()
-    github_box(flash=True)
-    time.sleep(0.4)
-    os.system("clear")
-
-
-play_intro()
 
 
 def run(command, timeout=8):
@@ -97,8 +102,8 @@ def run(command, timeout=8):
             text=True,
             timeout=timeout,
         )
-        return (result.stdout or result.stderr or "").strip()
-    except (OSError, subprocess.TimeoutExpired):
+        return (result.stdout or "").strip() or (result.stderr or "").strip()
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return ""
 
 
@@ -110,8 +115,32 @@ def read_file(path):
         return ""
 
 
+def load_props():
+    """Load all getprop values once. Much faster and more reliable on Termux."""
+    global _PROPS
+    if _PROPS is not None:
+        return _PROPS
+    _PROPS = {}
+    text = run(["getprop"], timeout=20)
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("[") or "]: [" not in line:
+            continue
+        try:
+            key, value = line.split("]: [", 1)
+            key = key[1:]
+            value = value[:-1] if value.endswith("]") else value
+            _PROPS[key] = value
+        except ValueError:
+            continue
+    return _PROPS
+
+
 def getprop(name):
-    return run(["getprop", name])
+    props = load_props()
+    if name in props:
+        return props[name]
+    return run(["getprop", name], timeout=5)
 
 
 def section(title):
@@ -135,6 +164,7 @@ def gb(num_bytes):
 
 def show_art():
     print(ART)
+    print(f"v{VERSION}")
     print()
     github_box(flash=False)
     print()
@@ -376,15 +406,14 @@ def sensors_and_extra():
 
 def all_props():
     section("All getprop values")
-    text = run(["getprop"])
-    if not text:
+    props = load_props()
+    if not props:
         show("getprop", "not available")
         return
-    lines = text.splitlines()
-    print(f"Total properties: {len(lines)}")
+    print(f"Total properties: {len(props)}")
     print()
-    for line in lines:
-        print(line)
+    for key in sorted(props):
+        print(f"[{key}]: [{props[key]}]")
 
 
 def bar(percent, width=28):
@@ -412,15 +441,25 @@ def mem_stats():
 
 def cpu_usage():
     def sample():
-        line = read_file("/proc/stat").splitlines()[0]
-        parts = [int(x) for x in line.split()[1:]]
-        idle = parts[3] + (parts[4] if len(parts) > 4 else 0)
-        total = sum(parts)
-        return idle, total
+        lines = read_file("/proc/stat").splitlines()
+        if not lines:
+            return 0, 0
+        parts = lines[0].split()[1:]
+        if len(parts) < 4:
+            return 0, 0
+        try:
+            numbers = [int(x) for x in parts]
+        except ValueError:
+            return 0, 0
+        idle = numbers[3] + (numbers[4] if len(numbers) > 4 else 0)
+        return idle, sum(numbers)
 
-    idle1, total1 = sample()
-    time.sleep(0.25)
-    idle2, total2 = sample()
+    try:
+        idle1, total1 = sample()
+        time.sleep(0.25)
+        idle2, total2 = sample()
+    except Exception:
+        return 0
     total_delta = total2 - total1
     idle_delta = idle2 - idle1
     if total_delta <= 0:
@@ -432,19 +471,22 @@ def live_monitor():
     os.system("clear")
     show_art()
     print("Live CPU / RAM")
-    print("Press Ctrl+C to stop.")
+    print("Press Ctrl+C (Volume Down + C) to stop.")
     print()
     try:
         while True:
             cpu = cpu_usage()
             total, used, available, percent = mem_stats()
-            print("\033[2K\r", end="")
+            os.system("clear")
+            show_art()
+            print("Live CPU / RAM")
+            print("Press Ctrl+C (Volume Down + C) to stop.")
+            print()
             print(f"CPU {bar(cpu)}")
             print(f"RAM {bar(percent)}  {round(used/1024)} / {round(total/1024)} MB")
-            print("\033[2A", end="", flush=True)
-            time.sleep(0.75)
+            time.sleep(0.8)
     except KeyboardInterrupt:
-        print("\n\nStopped.")
+        print("\nStopped.")
 
 
 def temperatures():
@@ -780,38 +822,24 @@ def folder_size_bytes(path):
 
 def process_list_tool():
     section("Top processes")
-    text = run(["ps", "-A", "-o", "PID,PCPU,PMEM,NAME"], timeout=10)
-    if not text or "PID" not in text.upper():
-        text = run(["ps", "-eo", "pid,pcpu,pmem,comm"], timeout=10)
-    if not text:
-        text = run(["ps", "-A"], timeout=10)
+    text = ""
+    for command in (
+        ["ps", "-A", "-o", "PID,ARGS"],
+        ["ps", "-A"],
+        ["ps"],
+    ):
+        text = run(command, timeout=10)
+        if text:
+            break
     if not text:
         print("Could not read process list.")
         return
 
     lines = [line.rstrip() for line in text.splitlines() if line.strip()]
-    print("\n".join(lines[:25]))
-    if len(lines) > 25:
-        print(f"... {len(lines) - 25} more lines")
-
-    print()
-    print("Sorted peek (best effort):")
-    rows = []
-    for line in lines[1:]:
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        pid = parts[0]
-        try:
-            cpu = float(parts[1].replace("%", ""))
-            mem = float(parts[2].replace("%", ""))
-        except ValueError:
-            continue
-        name = " ".join(parts[3:]) if len(parts) > 3 else parts[-1]
-        rows.append((cpu, mem, pid, name))
-    rows.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    for cpu, mem, pid, name in rows[:12]:
-        print(f"  PID {pid:>6}  CPU {cpu:5.1f}  MEM {mem:5.1f}  {name}")
+    print("\n".join(lines[:30]))
+    if len(lines) > 30:
+        print(f"... {len(lines) - 30} more lines")
+    show("Total listed", max(len(lines) - 1, 0))
 
 
 def kill_process_tool():
@@ -1052,7 +1080,7 @@ def battery_live_bar():
     section("Live battery")
     if not need_termux_api("termux-battery-status"):
         return
-    print("Press Ctrl+C to stop.")
+    print("Press Ctrl+C (Volume Down + C) to stop.")
     print()
     try:
         while True:
@@ -1066,9 +1094,12 @@ def battery_live_bar():
             except (json.JSONDecodeError, TypeError, ValueError):
                 print(raw or "no battery data")
                 return
-            print("\033[2K\r", end="")
+            os.system("clear")
+            show_art()
+            print("Live battery")
+            print("Press Ctrl+C (Volume Down + C) to stop.")
+            print()
             print(f"Battery {bar(percent)}  {status}")
-            print("\033[1A", end="", flush=True)
             time.sleep(1)
     except KeyboardInterrupt:
         print("\nStopped.")
@@ -1385,6 +1416,7 @@ def tools_menu():
 
 def menu():
     show_art()
+    print(f"Phone Info v{VERSION}")
     print("1. Full device report")
     print("2. Full device report + every getprop line")
     print("3. Info")
@@ -1401,27 +1433,38 @@ def menu():
 def full_report(include_all_props=False):
     os.system("clear")
     show_art()
-    print("Phone report")
+    print(f"Phone report v{VERSION}")
     print("=" * 44)
-    identity()
-    android_build()
-    kernel_info()
-    cpu_info()
-    memory_info()
-    storage_info()
-    battery_info()
-    network_info()
-    display_info()
-    sensors_and_extra()
-    uptime_english()
-    temperatures()
-    if include_all_props:
-        all_props()
+    try:
+        load_props()
+        identity()
+        android_build()
+        kernel_info()
+        cpu_info()
+        memory_info()
+        storage_info()
+        battery_info()
+        network_info()
+        display_info()
+        sensors_and_extra()
+        uptime_english()
+        temperatures()
+        if include_all_props:
+            all_props()
+    except Exception as error:
+        print()
+        print(f"Report error: {error}")
     print()
     github_box(flash=False)
 
 
 def main():
+    try:
+        play_intro()
+        load_props()
+    except Exception:
+        os.system("clear")
+
     while True:
         try:
             os.system("clear")
@@ -1451,6 +1494,9 @@ def main():
         except KeyboardInterrupt:
             print("\nBye.")
             break
+        except Exception as error:
+            print(f"\nError: {error}")
+            pause()
 
 
 if __name__ == "__main__":
